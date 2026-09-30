@@ -9,6 +9,7 @@ from aiogram import Router
 from aiogram.types import ChosenInlineResult, InlineQuery, InlineQueryResultsButton
 
 from ..config import Settings
+from ..debounce import Debouncer
 from ..render import audio_results, notice_result
 from ..service import SearchService, SearchUnavailable
 from ..text import shorten
@@ -33,7 +34,12 @@ def _parse_offset(raw: str) -> int:
 
 
 @router.inline_query()
-async def handle_inline(query: InlineQuery, search: SearchService, settings: Settings) -> None:
+async def handle_inline(
+    query: InlineQuery,
+    search: SearchService,
+    settings: Settings,
+    debouncer: Debouncer,
+) -> None:
     text = query.query.strip()
     offset = _parse_offset(query.offset)
 
@@ -55,9 +61,20 @@ async def handle_inline(query: InlineQuery, search: SearchService, settings: Set
         await query.answer(results=[], cache_time=settings.inline_cache_time, is_personal=False)
         return
 
+    # 3. Already cached — answer now, no reason to sit through the debounce.
+    cached = await search.peek(text, offset)
+    if cached is None:
+        # Typing produces one query per keystroke. Wait briefly and drop this
+        # one if a newer keystroke arrives, so only the last prefix of a burst
+        # reaches the provider. Pagination is exempt: it comes from scrolling,
+        # and Telegram does not retry a request we leave unanswered.
+        if offset == 0 and query.from_user is not None:
+            if not await debouncer.settle(query.from_user.id):
+                return
+
     try:
-        # 3. Empty query — show the Deezer chart instead of nothing.
-        result = await (search.chart() if not text else search.search(text, offset))
+        # 4. Empty query — show the Deezer chart instead of nothing.
+        result = cached or await (search.chart() if not text else search.search(text, offset))
     except SearchUnavailable as exc:
         log.warning("search unavailable for %r: %s", text, exc)
         await query.answer(
@@ -79,7 +96,7 @@ async def handle_inline(query: InlineQuery, search: SearchService, settings: Set
 
     tracks = result.page.tracks
 
-    # 4. Nothing found.
+    # 5. Nothing found.
     if not tracks:
         # On a second page an empty result simply means the list ended — no need
         # to shout "nothing found" at the user.
@@ -106,7 +123,7 @@ async def handle_inline(query: InlineQuery, search: SearchService, settings: Set
         )
         return
 
-    # 5. Normal path. next_offset advances by the requested page size (the
+    # 6. Normal path. next_offset advances by the requested page size (the
     # upstream index), not by the number of rows left after de-duplication.
     next_page = offset + search.page_size
     next_offset = str(next_page) if result.page.has_more and next_page < MAX_OFFSET else ""

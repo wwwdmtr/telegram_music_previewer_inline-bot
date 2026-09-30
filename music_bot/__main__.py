@@ -19,6 +19,7 @@ from aiogram.types import (
 from pydantic import ValidationError
 
 from .cache import CacheBackend, MemoryCache, RedisCache
+from .debounce import Debouncer
 from .config import Settings
 from .handlers import build_router
 from .providers import DeezerProvider, ITunesProvider, SearchProvider
@@ -131,6 +132,11 @@ async def run(settings: Settings) -> None:
     dp["settings"] = settings
     throttle_stats = ThrottleStats()
     dp["throttle_stats"] = throttle_stats
+    dp["debouncer"] = Debouncer(
+        delay=settings.debounce_delay,
+        max_users=settings.throttle_max_users,
+        stats=throttle_stats,
+    )
     dp.include_router(build_router())
 
     # Outer middleware: runs before filters, so a throttled update costs nothing.
@@ -158,6 +164,7 @@ async def run(settings: Settings) -> None:
             exempt=exempt,
         )
     )
+    log.info("debounce: %.0f ms (cached answers skip it)", settings.debounce_delay * 1000)
     log.info(
         "throttle: inline %.1f/s burst %d, messages %.1f/s burst %d",
         settings.throttle_inline_rate,

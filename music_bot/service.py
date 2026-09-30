@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Sequence
+from typing import Awaitable, Callable, Optional, Sequence
 
 from .cache import CacheBackend, CacheEntry
 from .models import SearchPage
@@ -82,14 +82,34 @@ class SearchService:
     def page_size(self) -> int:
         return self._page_size
 
+    def _search_key(self, normalized: str, offset: int) -> str:
+        return f"s:{normalized}:{offset}:{self._page_size}"
+
     async def search(self, query: str, offset: int = 0) -> SearchResult:
         normalized = normalize_query(query)
-        key = f"s:{normalized}:{offset}:{self._page_size}"
+        key = self._search_key(normalized, offset)
         return await self._get(key, lambda p: p.search(normalized, offset, self._page_size))
 
     async def chart(self) -> SearchResult:
         key = f"c:{self._page_size}"
         return await self._get(key, lambda p: p.chart(self._page_size))
+
+    async def peek(self, query: str, offset: int = 0) -> Optional[SearchResult]:
+        """A fresh cached answer, or None. Never touches a provider.
+
+        Lets the caller answer instantly instead of sitting through a debounce
+        window for something already known.
+        """
+        key = (
+            self._search_key(normalize_query(query), offset)
+            if query
+            else f"c:{self._page_size}"
+        )
+        entry = await self._cache.get(key)
+        if entry and entry.is_fresh(self._fresh_ttl):
+            self.stats.hits += 1
+            return SearchResult(page=entry.page, source="cache")
+        return None
 
     async def _get(self, key: str, call: ProviderCall) -> SearchResult:
         cached = await self._cache.get(key)

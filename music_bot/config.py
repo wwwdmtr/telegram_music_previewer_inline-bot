@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # Upper bound on remembered users, so a flood of ids cannot grow memory.
     throttle_max_users: int = 10000
 
+    # --- Debounce ---------------------------------------------------------
+    # Wait this long before searching; if a newer keystroke arrives meanwhile,
+    # the older query is abandoned. Only the last query of a burst reaches the
+    # provider. 0 disables it. Cached answers skip the wait entirely.
+    debounce_delay: float = 0.25
+
     log_level: str = "INFO"
 
     @field_validator("bot_token")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 
 from music_bot.cache import MemoryCache
 from music_bot.config import Settings
+from music_bot.debounce import Debouncer
 from music_bot.handlers.inline import handle_inline
 from music_bot.models import SearchPage, Track
 from music_bot.providers.base import ProviderError, ProviderUnsupported, SearchProvider
@@ -19,11 +21,17 @@ TOKEN = "123456789:AAEdummytokenfortestsonly0123456789"
 
 
 @dataclass
+class FakeUser:
+    id: int = 1
+
+
+@dataclass
 class FakeQuery:
     """Stands in for aiogram's InlineQuery: the handler only reads these fields."""
 
     query: str = ""
     offset: str = ""
+    from_user: Any = field(default_factory=FakeUser)
     answered: dict[str, Any] = field(default_factory=dict)
 
     async def answer(self, **kwargs):
@@ -38,8 +46,10 @@ class StubProvider(SearchProvider):
         self._tracks = tracks or []
         self._chart = chart_tracks or []
         self._fail = fail
+        self.searches = 0
 
     async def search(self, query: str, offset: int, limit: int) -> SearchPage:
+        self.searches += 1
         if self._fail:
             raise ProviderError("stub down")
         return SearchPage(tracks=list(self._tracks), has_more=len(self._tracks) >= limit,
@@ -73,12 +83,17 @@ def service(provider) -> SearchService:
     return SearchService([provider], MemoryCache(100, 1800), fresh_ttl=300, page_size=2)
 
 
+def debouncer(delay: float = 0.0) -> Debouncer:
+    """Delay 0 in most tests: the debounce is exercised in its own cases below."""
+    return Debouncer(delay=delay, max_users=100)
+
+
 @pytest.mark.asyncio
 async def test_short_query_never_reaches_the_provider():
     provider = StubProvider(tracks=[track(1)])
     query = FakeQuery(query="a")
 
-    await handle_inline(query, service(provider), settings())
+    await handle_inline(query, service(provider), settings(), debouncer())
 
     assert query.answered["results"] == []
     assert "минимум 2" in query.answered["button"].text
@@ -90,7 +105,7 @@ async def test_empty_query_shows_the_chart():
     provider = StubProvider(chart_tracks=[track(1), track(2)])
     query = FakeQuery(query="")
 
-    await handle_inline(query, service(provider), settings())
+    await handle_inline(query, service(provider), settings(), debouncer())
 
     assert len(query.answered["results"]) == 2
     assert query.answered["results"][0].type == "audio"
@@ -100,7 +115,7 @@ async def test_empty_query_shows_the_chart():
 async def test_nothing_found_returns_a_visible_explanation():
     query = FakeQuery(query="asdkjhqwe")
 
-    await handle_inline(query, service(StubProvider(tracks=[])), settings())
+    await handle_inline(query, service(StubProvider(tracks=[])), settings(), debouncer())
 
     results = query.answered["results"]
     assert len(results) == 1
@@ -116,7 +131,7 @@ async def test_end_of_pagination_is_silent():
     """An empty second page means the list ended, not that nothing was found."""
     query = FakeQuery(query="whatever", offset="20")
 
-    await handle_inline(query, service(StubProvider(tracks=[])), settings())
+    await handle_inline(query, service(StubProvider(tracks=[])), settings(), debouncer())
 
     assert query.answered["results"] == []
     assert "button" not in query.answered
@@ -126,7 +141,7 @@ async def test_end_of_pagination_is_silent():
 async def test_upstream_failure_is_reported_and_barely_cached():
     query = FakeQuery(query="whatever")
 
-    await handle_inline(query, service(StubProvider(fail=True)), settings())
+    await handle_inline(query, service(StubProvider(fail=True)), settings(), debouncer())
 
     results = query.answered["results"]
     assert results[0].title == "Сервис поиска недоступен"
@@ -139,7 +154,7 @@ async def test_next_offset_advances_by_page_size():
     provider = StubProvider(tracks=[track(1), track(2)])  # == page_size -> has_more
     query = FakeQuery(query="whatever", offset="2")
 
-    await handle_inline(query, service(provider), settings())
+    await handle_inline(query, service(provider), settings(), debouncer())
 
     assert query.answered["next_offset"] == "4"
     assert query.answered["is_personal"] is False
@@ -150,7 +165,7 @@ async def test_last_page_has_no_next_offset():
     provider = StubProvider(tracks=[track(1)])  # < page_size -> no more
     query = FakeQuery(query="whatever")
 
-    await handle_inline(query, service(provider), settings())
+    await handle_inline(query, service(provider), settings(), debouncer())
 
     assert query.answered["next_offset"] == ""
 
@@ -160,7 +175,7 @@ async def test_garbage_offset_is_treated_as_first_page():
     provider = StubProvider(tracks=[track(1)])
     query = FakeQuery(query="whatever", offset="not-a-number")
 
-    await handle_inline(query, service(provider), settings())
+    await handle_inline(query, service(provider), settings(), debouncer())
 
     assert query.answered["next_offset"] == ""
     assert len(query.answered["results"]) == 1
@@ -176,7 +191,7 @@ async def test_html_in_query_is_escaped_in_the_not_found_message(bad):
     answerInlineQuery call fail, so the user would see nothing at all."""
     query = FakeQuery(query=bad)
 
-    await handle_inline(query, service(StubProvider(tracks=[])), settings())
+    await handle_inline(query, service(StubProvider(tracks=[])), settings(), debouncer())
 
     content = query.answered["results"][0].input_message_content
     assert content.parse_mode == "HTML"
@@ -193,7 +208,7 @@ async def test_deep_scroll_ends_the_list_instead_of_looping():
     provider = StubProvider(tracks=[track(1), track(2)])  # always says has_more
     query = FakeQuery(query="whatever", offset="500")
 
-    await handle_inline(query, service(provider), settings())
+    await handle_inline(query, service(provider), settings(), debouncer())
 
     assert query.answered["results"] == []
     assert query.answered.get("next_offset", "") == ""
@@ -204,7 +219,105 @@ async def test_next_offset_stops_before_the_cap():
     provider = StubProvider(tracks=[track(1), track(2)])
     query = FakeQuery(query="whatever", offset="498")
 
-    await handle_inline(query, service(provider), settings())
+    await handle_inline(query, service(provider), settings(), debouncer())
 
     assert query.answered["results"]  # this page is still served
     assert query.answered["next_offset"] == ""  # but there is no page after it
+
+
+# --- debounce ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_superseded_keystroke_is_not_answered():
+    """Typing produces a query per keystroke; only the last one should search."""
+    provider = StubProvider(tracks=[track(1)])
+    svc = service(provider)
+    deb = Debouncer(delay=0.05, max_users=10)
+
+    first = FakeQuery(query="radioh")
+    second = FakeQuery(query="radiohead")
+    task = asyncio.create_task(handle_inline(first, svc, settings(), deb))
+    await asyncio.sleep(0.01)  # first is inside its debounce window
+    await handle_inline(second, svc, settings(), deb)
+    await task
+
+    assert first.answered == {}  # abandoned
+    assert second.answered["results"]  # answered
+
+
+@pytest.mark.asyncio
+async def test_a_lone_query_still_answers_after_the_delay():
+    deb = Debouncer(delay=0.02, max_users=10)
+    query = FakeQuery(query="radiohead")
+
+    await handle_inline(query, service(StubProvider(tracks=[track(1)])), settings(), deb)
+
+    assert query.answered["results"]
+
+
+@pytest.mark.asyncio
+async def test_cached_answer_skips_the_debounce_wait():
+    """A debounce must never make an already-known answer slow."""
+    svc = service(StubProvider(tracks=[track(1)]))
+    await svc.search("radiohead")  # warm the cache
+
+    deb = Debouncer(delay=5.0, max_users=10)  # would dominate if it applied
+    query = FakeQuery(query="radiohead")
+
+    started = asyncio.get_running_loop().time()
+    await handle_inline(query, svc, settings(), deb)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert query.answered["results"]
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_pagination_is_never_debounced():
+    """Scrolling is not typing, and Telegram does not retry a dropped page."""
+    deb = Debouncer(delay=5.0, max_users=10)
+    query = FakeQuery(query="radiohead", offset="2")
+
+    started = asyncio.get_running_loop().time()
+    await handle_inline(query, service(StubProvider(tracks=[track(1)])), settings(), deb)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert query.answered["results"]
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_debounce_only_drops_the_same_users_queries():
+    provider = StubProvider(tracks=[track(1)])
+    svc = service(provider)
+    deb = Debouncer(delay=0.05, max_users=10)
+
+    mine = FakeQuery(query="abc", from_user=FakeUser(id=1))
+    theirs = FakeQuery(query="xyz", from_user=FakeUser(id=2))
+    task = asyncio.create_task(handle_inline(mine, svc, settings(), deb))
+    await asyncio.sleep(0.01)
+    await handle_inline(theirs, svc, settings(), deb)
+    await task
+
+    # A different user's typing must not cancel mine.
+    assert mine.answered["results"]
+    assert theirs.answered["results"]
+
+
+@pytest.mark.asyncio
+async def test_burst_of_keystrokes_reaches_the_provider_once():
+    provider = StubProvider(tracks=[track(1)])
+    svc = service(provider)
+    deb = Debouncer(delay=0.05, max_users=10)
+
+    prefixes = ["r", "ra", "rad", "radi", "radio", "radioh", "radiohe", "radiohead"]
+    tasks = []
+    for prefix in prefixes:
+        tasks.append(asyncio.create_task(handle_inline(FakeQuery(query=prefix), svc, settings(), deb)))
+        await asyncio.sleep(0.005)  # faster than the debounce window
+    await asyncio.gather(*tasks)
+
+    # "r" is below min_query_length and never searches; of the rest only the
+    # last survives the debounce.
+    assert provider.searches == 1

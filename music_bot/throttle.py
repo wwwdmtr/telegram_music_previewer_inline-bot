@@ -36,11 +36,13 @@ BUCKET_TTL = 600
 class ThrottleStats:
     messages_throttled: int = 0
     inline_throttled: int = 0
+    debounced: int = 0
 
     def as_text(self) -> str:
         return (
             f"отброшено флудом: {self.messages_throttled} сообщений, "
-            f"{self.inline_throttled} инлайн-запросов"
+            f"{self.inline_throttled} инлайн-запросов\n"
+            f"склеено дебаунсом: {self.debounced} нажатий"
         )
 
 
