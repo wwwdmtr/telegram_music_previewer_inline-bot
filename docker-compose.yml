@@ -1,0 +1,25 @@
+# Default: just the bot, cache in process. Enough for a single replica.
+# Need a shared cache across replicas? Add the Redis overlay:
+#   docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d
+
+# Explicit project name so containers/networks never collide with whatever else
+# runs on the same Docker daemon (by default Compose uses the directory name).
+name: music-inline-bot
+
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    # Long syntax with required:false so the stack also deploys where settings
+    # come from the platform's env vars instead of a committed file (.env is
+    # gitignored). Locally a missing .env just yields the config error message.
+    env_file:
+      - path: .env
+        required: false
+    # No published ports: the bot dials out to Telegram over long polling, so it
+    # cannot clash with anything else on the host.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

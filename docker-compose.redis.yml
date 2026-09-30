@@ -1,0 +1,32 @@
+# Overlay that swaps the in-process cache for a Redis one — needed once more
+# than one bot replica runs, otherwise each replica caches on its own.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d
+
+services:
+  bot:
+    environment:
+      # Overrides whatever .env says: inside the project network Redis is
+      # reachable by service name.
+      CACHE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # A disposable cache: no persistence, hard memory cap, evict the coldest
+    # keys instead of growing or refusing writes.
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
